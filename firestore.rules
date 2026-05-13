@@ -1,0 +1,60 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global Helpers
+    function isSignedIn() { return request.auth != null; }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    function isAdmin() { return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)); }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    // User Validation
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email']) 
+        && data.uid == request.auth.uid
+        && data.email is string && data.email.size() <= 200
+        && (!('name' in data) || (data.name is string && data.name.size() <= 100))
+        && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 500))
+        && (!('streak' in data) || (data.streak is int))
+        && (!('lastEntryDate' in data) || (data.lastEntryDate is string));
+    }
+
+    // Entry Validation
+    function isValidEntry(data) {
+      return data.keys().hasAll(['userId', 'date', 'mood', 'content', 'createdAt'])
+        && data.userId == request.auth.uid
+        && data.date is string && data.date.size() == 10 // YYYY-MM-DD
+        && data.mood in ['great', 'good', 'neutral', 'sad', 'awful']
+        && data.content is string && data.content.size() <= 10000
+        && data.createdAt == request.time;
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidUser(incoming());
+      allow update: if isOwner(userId) && isValidUser(incoming())
+        && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'photoURL', 'streak', 'lastEntryDate']);
+      
+      match /entries/{entryId} {
+        allow list: if isOwner(userId);
+        allow get: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(entryId) && isValidEntry(incoming());
+        allow update: if isOwner(userId) && isValidEntry(incoming())
+          && incoming().diff(existing()).affectedKeys().hasOnly(['mood', 'content', 'challengeId', 'updatedAt'])
+          && incoming().updatedAt == request.time;
+        allow delete: if isOwner(userId);
+      }
+    }
+
+    match /challenges/{challengeId} {
+      allow list, get: if isSignedIn();
+      allow write: if false; // Only manageable via console or admin for now
+    }
+  }
+}
